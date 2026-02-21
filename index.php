@@ -538,5 +538,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_FILES['uploads']['name'][0]
       <pre><?=h(implode("\n\n", $log))?></pre>
     </div>
   <?php endif; ?>
+
+  <footer style="text-align:center;padding:24px 0;margin-top:32px;color:#666;font-size:14px;border-top:1px solid #eee;">
+    Eine Entwicklung von Stefan Schneider - <a href="https://www.web-mex.de" target="_blank" rel="noopener noreferrer" style="color:#0066cc;text-decoration:none;">Web-Mex.de</a>
+  </footer>
 </body>
 </html>
