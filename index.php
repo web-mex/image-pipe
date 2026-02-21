@@ -313,7 +313,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_FILES['uploads']['name'][0]
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>ImageMagick Mini-UI</title>
+  <title>Web-Mex ImageMagick Mini-UI</title>
   <script>
     function toggleResizeMode(mode) {
       const maxEdgeFields = document.getElementById('maxEdgeFields');
