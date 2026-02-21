@@ -10,6 +10,26 @@ function listFiles(string $dir): array {
   return $files ? array_map('basename', $files) : [];
 }
 
+function getTotalSize(string $dir): int {
+  if (!is_dir($dir)) return 0;
+  $files = glob($dir . DIRECTORY_SEPARATOR . "*.{jpg,jpeg,png,webp,JPG,JPEG,PNG,WEBP}", GLOB_BRACE);
+  if (!$files) return 0;
+  $totalSize = 0;
+  foreach ($files as $file) {
+    if (is_file($file)) {
+      $totalSize += filesize($file);
+    }
+  }
+  return $totalSize;
+}
+
+function formatBytes(int $bytes): string {
+  if ($bytes === 0) return '0 B';
+  $units = ['B', 'KB', 'MB', 'GB'];
+  $i = (int)floor(log($bytes) / log(1024));
+  return round($bytes / pow(1024, $i), 2) . ' ' . $units[$i];
+}
+
 function deleteFolder(string $dir): bool {
   if (!is_dir($dir)) return false;
   $files = glob($dir . DIRECTORY_SEPARATOR . "*", GLOB_BRACE);
@@ -24,9 +44,40 @@ $projectRoot = __DIR__;
 $defaultInput  = $projectRoot . DIRECTORY_SEPARATOR . 'input';
 $defaultOutput = $projectRoot . DIRECTORY_SEPARATOR . 'output';
 
+$input  = $_POST['input']  ?? $defaultInput;
+$output = $_POST['output'] ?? $defaultOutput;
+$resizeMode = $_POST['resizeMode'] ?? ($_COOKIE['resizeMode'] ?? 'maxEdge'); // maxEdge|fixedSize
+$maxEdge = (int)($_POST['maxEdge'] ?? ($_COOKIE['maxEdge'] ?? 1600));
+$fixedWidth = (int)($_POST['fixedWidth'] ?? ($_COOKIE['fixedWidth'] ?? 1200));
+$fixedHeight = (int)($_POST['fixedHeight'] ?? ($_COOKIE['fixedHeight'] ?? 800));
+$cropGravity = $_POST['cropGravity'] ?? ($_COOKIE['cropGravity'] ?? 'center'); // gravity option für convert
+$quality = (int)($_POST['quality'] ?? ($_COOKIE['quality'] ?? 85));
+$format  = $_POST['format'] ?? ($_COOKIE['format'] ?? 'webp'); // webp|jpg|both
+
 $log = [];
 $ran = false;
 $uploadedFiles = [];
+
+// Datei umbenennen
+if (!empty($_POST['renameFile']) && !empty($_POST['oldName']) && !empty($_POST['newName'])) {
+  $oldName = basename($_POST['oldName']);
+  $newName = basename($_POST['newName']);
+  $oldPath = $input . DIRECTORY_SEPARATOR . $oldName;
+  $newPath = $input . DIRECTORY_SEPARATOR . $newName;
+  
+  if (file_exists($oldPath) && !file_exists($newPath)) {
+    if (rename($oldPath, $newPath)) {
+      $log[] = "✅ Datei umbenannt: $oldName → $newName";
+      $ran = true;
+    } else {
+      $log[] = "❌ Umbenennung fehlgeschlagen: $oldName";
+      $ran = true;
+    }
+  } else {
+    $log[] = "❌ Datei existiert bereits oder nicht gefunden: $newName";
+    $ran = true;
+  }
+}
 
 // Ordner-Inhalt löschen
 if (!empty($_POST['deleteFolder'])) {
@@ -44,40 +95,35 @@ if (!empty($_POST['deleteFolder'])) {
 
 // ZIP-Download des Output-Ordners
 if (!empty($_POST['downloadZip'])) {
-  $zipFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'image-pipe-' . time() . '.zip';
-  $zip = new ZipArchive();
-  
-  if ($zip->open($zipFile, ZipArchive::CREATE) === TRUE) {
-    $files = glob($output . DIRECTORY_SEPARATOR . "*");
-    foreach ((array)$files as $file) {
-      if (is_file($file)) {
-        $zip->addFile($file, basename($file));
-      }
-    }
-    $zip->close();
-    
-    // Download starten
-    header('Content-Type: application/zip');
-    header('Content-Disposition: attachment; filename="output-' . date('Y-m-d-His') . '.zip"');
-    header('Content-Length: ' . filesize($zipFile));
-    readfile($zipFile);
-    @unlink($zipFile);
-    exit;
-  } else {
-    $log[] = "❌ ZIP-Datei konnte nicht erstellt werden.";
+  $outputFiles = glob($output . DIRECTORY_SEPARATOR . "*");
+  if (empty($outputFiles)) {
+    $log[] = "❌ Output-Ordner ist leer, nichts zum Herunterladen.";
     $ran = true;
+  } else {
+    $zipFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'image-pipe-' . time() . '.zip';
+    $zip = new ZipArchive();
+    
+    if ($zip->open($zipFile, ZipArchive::CREATE) === TRUE) {
+      foreach ($outputFiles as $file) {
+        if (is_file($file)) {
+          $zip->addFile($file, basename($file));
+        }
+      }
+      $zip->close();
+      
+      // Download starten
+      header('Content-Type: application/zip');
+      header('Content-Disposition: attachment; filename="output-' . date('Y-m-d-His') . '.zip"');
+      header('Content-Length: ' . filesize($zipFile));
+      readfile($zipFile);
+      @unlink($zipFile);
+      exit;
+    } else {
+      $log[] = "❌ ZIP-Datei konnte nicht erstellt werden.";
+      $ran = true;
+    }
   }
 }
-
-$input  = $_POST['input']  ?? $defaultInput;
-$output = $_POST['output'] ?? $defaultOutput;
-$resizeMode = $_POST['resizeMode'] ?? 'maxEdge'; // maxEdge|fixedSize
-$maxEdge = (int)($_POST['maxEdge'] ?? 1600);
-$fixedWidth = (int)($_POST['fixedWidth'] ?? 1200);
-$fixedHeight = (int)($_POST['fixedHeight'] ?? 800);
-$cropGravity = $_POST['cropGravity'] ?? 'center'; // gravity option für convert
-$quality = (int)($_POST['quality'] ?? 85);
-$format  = $_POST['format'] ?? 'webp'; // webp|jpg|both
 
 // Grenzen, damit nix völlig kaputt geht
 $maxEdge = max(100, min($maxEdge, 20000));
@@ -148,6 +194,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_FILES['uploads']['name'][0
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_FILES['uploads']['name'][0])) {
   $ran = true;
+  
+  // Cookie setzen für Einstellungen (1 Jahr Gültigkeit)
+  $cookieExpire = time() + (365 * 24 * 60 * 60);
+  setcookie('resizeMode', $resizeMode, $cookieExpire, '/');
+  setcookie('maxEdge', (string)$maxEdge, $cookieExpire, '/');
+  setcookie('fixedWidth', (string)$fixedWidth, $cookieExpire, '/');
+  setcookie('fixedHeight', (string)$fixedHeight, $cookieExpire, '/');
+  setcookie('cropGravity', $cropGravity, $cookieExpire, '/');
+  setcookie('quality', (string)$quality, $cookieExpire, '/');
+  setcookie('format', $format, $cookieExpire, '/');
 
   if ($input === '' || $output === '') {
     $log[] = "❌ Bitte Input- und Output-Ordner angeben.";
@@ -270,6 +326,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_FILES['uploads']['name'][0]
         fixedSizeFields.style.display = 'block';
       }
     }
+    
+    function toggleRename(filename) {
+      const display = document.getElementById('display-' + filename);
+      const form = document.getElementById('form-' + filename);
+      if (display && form) {
+        display.style.display = 'none';
+        form.style.display = 'flex';
+        form.querySelector('input[name="newName"]').focus();
+      }
+    }
+    
+    function cancelRename(filename) {
+      const display = document.getElementById('display-' + filename);
+      const form = document.getElementById('form-' + filename);
+      if (display && form) {
+        display.style.display = 'flex';
+        form.style.display = 'none';
+      }
+    }
   </script>
   <style>
     body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;max-width:900px;margin:24px auto;padding:0 16px;}
@@ -314,12 +389,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_FILES['uploads']['name'][0]
         if (empty($inputFiles)) {
           echo '<p style="color:#999;">Keine Dateien vorhanden</p>';
         } else {
-          echo '<ul style="margin:0;padding-left:20px;">';
+          echo '<ul style="margin:0;padding:0;list-style:none;">';
           foreach ($inputFiles as $file) {
-            echo '<li>' . h($file) . '</li>';
+            $fileId = md5($file);
+            echo '<li style="margin:8px 0;padding:8px;background:#f9f9f9;border-radius:6px;">';
+            
+            // Anzeige-Modus
+            echo '<div id="display-' . h($fileId) . '" style="display:flex;align-items:center;justify-content:space-between;gap:8px;">';
+            echo '<span style="flex:1;word-break:break-all;">' . h($file) . '</span>';
+            echo '<button type="button" onclick="toggleRename(\'' . h($fileId) . '\')" style="padding:4px 8px;background:#6c757d;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;">✏️ Umbenennen</button>';
+            echo '</div>';
+            
+            // Edit-Modus (versteckt)
+            echo '<form id="form-' . h($fileId) . '" method="post" style="display:none;gap:8px;align-items:center;">';
+            echo '<input type="hidden" name="renameFile" value="1">';
+            echo '<input type="hidden" name="oldName" value="' . h($file) . '">';
+            echo '<input type="text" name="newName" value="' . h($file) . '" style="flex:1;padding:6px;border:1px solid #ccc;border-radius:4px;font-size:14px;" required>';
+            echo '<button type="submit" style="padding:6px 12px;background:#28a745;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;">💾 Speichern</button>';
+            echo '<button type="button" onclick="cancelRename(\'' . h($fileId) . '\')" style="padding:6px 12px;background:#6c757d;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;">✕</button>';
+            echo '</form>';
+            
+            echo '</li>';
           }
           echo '</ul>';
-          echo '<p style="color:#666;font-size:12px;">Gesamt: ' . count($inputFiles) . ' Datei(en)</p>';
+          $inputSize = getTotalSize($input);
+          echo '<p style="color:#666;font-size:12px;margin-top:12px;">Gesamt: ' . count($inputFiles) . ' Datei(en) – ' . formatBytes($inputSize) . '</p>';
         }
       ?>
     </div>
@@ -351,12 +445,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_FILES['uploads']['name'][0]
             echo '<li style="margin:6px 0;"><a href="' . h($fileUrl) . '" download style="color:#0066cc;text-decoration:none;display:inline-flex;align-items:center;gap:6px;"><span>⬇</span><span>' . h($file) . '</span></a></li>';
           }
           echo '</ul>';
-          echo '<p style="color:#666;font-size:12px;margin-top:12px;">Gesamt: ' . count($outputFiles) . ' Datei(en)</p>';
+          $outputSize = getTotalSize($output);
+          $inputSize = getTotalSize($input);
+          echo '<p style="color:#666;font-size:12px;margin-top:12px;">Gesamt: ' . count($outputFiles) . ' Datei(en) – ' . formatBytes($outputSize);
+          if ($inputSize > 0 && $outputSize > 0) {
+            $savings = $inputSize - $outputSize;
+            $savingsPercent = round(($savings / $inputSize) * 100, 1);
+            $savingsColor = $savings > 0 ? '#28a745' : '#dc3545';
+            echo ' <span style="color:' . $savingsColor . ';font-weight:600;">';
+            if ($savings > 0) {
+              echo '(✓ ' . formatBytes($savings) . ' eingespart – ' . $savingsPercent . '%)';
+            } else {
+              echo '(⚠ ' . formatBytes(abs($savings)) . ' größer)';
+            }
+            echo '</span>';
+          }
+          echo '</p>';
         }
       ?>
     </div>
   </div>
 
+  <?php if (!empty(listFiles($input))): ?>
   <div class="card">
     <h2>⚙️ Batch-Verarbeitung</h2>
     <form method="post">
@@ -420,6 +530,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_FILES['uploads']['name'][0]
       <button type="submit">Start</button>
     </form>
   </div>
+  <?php endif; ?>
 
   <?php if ($ran): ?>
     <div class="card">
