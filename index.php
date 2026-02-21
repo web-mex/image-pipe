@@ -10,6 +10,15 @@ function listFiles(string $dir): array {
   return $files ? array_map('basename', $files) : [];
 }
 
+function deleteFolder(string $dir): bool {
+  if (!is_dir($dir)) return false;
+  $files = glob($dir . DIRECTORY_SEPARATOR . "*", GLOB_BRACE);
+  foreach ((array)$files as $file) {
+    if (is_file($file)) @unlink($file);
+  }
+  return true;
+}
+
 // Projektbasierte Ordner (sicherer für Webserver)
 $projectRoot = __DIR__;
 $defaultInput  = $projectRoot . DIRECTORY_SEPARATOR . 'input';
@@ -19,14 +28,61 @@ $log = [];
 $ran = false;
 $uploadedFiles = [];
 
+// Ordner-Inhalt löschen
+if (!empty($_POST['deleteFolder'])) {
+  $folderToDelete = $_POST['deleteFolder'] === 'input' ? $defaultInput : $defaultOutput;
+  if (is_dir($folderToDelete)) {
+    if (deleteFolder($folderToDelete)) {
+      $log[] = "🗑️ Inhalt von " . ($_POST['deleteFolder'] === 'input' ? "Input" : "Output") . "-Ordner gelöscht.";
+      $ran = true;
+    } else {
+      $log[] = "❌ Ordner konnte nicht geleert werden.";
+      $ran = true;
+    }
+  }
+}
+
+// ZIP-Download des Output-Ordners
+if (!empty($_POST['downloadZip'])) {
+  $zipFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'image-pipe-' . time() . '.zip';
+  $zip = new ZipArchive();
+  
+  if ($zip->open($zipFile, ZipArchive::CREATE) === TRUE) {
+    $files = glob($output . DIRECTORY_SEPARATOR . "*");
+    foreach ((array)$files as $file) {
+      if (is_file($file)) {
+        $zip->addFile($file, basename($file));
+      }
+    }
+    $zip->close();
+    
+    // Download starten
+    header('Content-Type: application/zip');
+    header('Content-Disposition: attachment; filename="output-' . date('Y-m-d-His') . '.zip"');
+    header('Content-Length: ' . filesize($zipFile));
+    readfile($zipFile);
+    @unlink($zipFile);
+    exit;
+  } else {
+    $log[] = "❌ ZIP-Datei konnte nicht erstellt werden.";
+    $ran = true;
+  }
+}
+
 $input  = $_POST['input']  ?? $defaultInput;
 $output = $_POST['output'] ?? $defaultOutput;
+$resizeMode = $_POST['resizeMode'] ?? 'maxEdge'; // maxEdge|fixedSize
 $maxEdge = (int)($_POST['maxEdge'] ?? 1600);
+$fixedWidth = (int)($_POST['fixedWidth'] ?? 1200);
+$fixedHeight = (int)($_POST['fixedHeight'] ?? 800);
+$cropGravity = $_POST['cropGravity'] ?? 'center'; // gravity option für convert
 $quality = (int)($_POST['quality'] ?? 85);
 $format  = $_POST['format'] ?? 'webp'; // webp|jpg|both
 
 // Grenzen, damit nix völlig kaputt geht
 $maxEdge = max(100, min($maxEdge, 20000));
+$fixedWidth = max(100, min($fixedWidth, 20000));
+$fixedHeight = max(100, min($fixedHeight, 20000));
 $quality = max(1, min($quality, 100));
 
 // Datei-Upload verarbeiten
@@ -153,7 +209,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_FILES['uploads']['name'][0]
         if ($format === 'jpg' || $format === 'both') {
           $outJ = rtrim($output, "/\\") . DIRECTORY_SEPARATOR . $base . ".jpg";
           $outJ = escapeshellarg($outJ);
-          $cmdJ = "$cmd $in -resize {$maxEdge}x{$maxEdge}{$gt} -strip -quality $quality $outJ";
+          
+          // Resize-Befehl basierend auf Modus
+          if ($resizeMode === 'fixedSize') {
+            // Feste Größe mit Cropping
+            $cmdJ = "$cmd $in -resize {$fixedWidth}x{$fixedHeight}^ -gravity $cropGravity -extent {$fixedWidth}x{$fixedHeight} -strip -quality $quality $outJ";
+          } else {
+            // Max. Kantenlänge (ursprünglicher Modus)
+            $isWin = stripos(PHP_OS, 'WIN') === 0;
+            $gt = $isWin ? '^>' : '\>';
+            $cmdJ = "$cmd $in -resize {$maxEdge}x{$maxEdge}{$gt} -strip -quality $quality $outJ";
+          }
+          
           @exec($cmdJ . " 2>&1", $oJ, $rcJ);
           if ($rcJ !== 0) $log[] = "❌ JPG Fehler: $file\n" . implode("\n", $oJ);
         }
@@ -161,7 +228,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_FILES['uploads']['name'][0]
         if ($format === 'webp' || $format === 'both') {
           $outW = rtrim($output, "/\\") . DIRECTORY_SEPARATOR . $base . ".webp";
           $outW = escapeshellarg($outW);
-          $cmdW = "$cmd $in -resize {$maxEdge}x{$maxEdge}{$gt} -strip -quality $quality $outW";
+          
+          // Resize-Befehl basierend auf Modus
+          if ($resizeMode === 'fixedSize') {
+            // Feste Größe mit Cropping
+            $cmdW = "$cmd $in -resize {$fixedWidth}x{$fixedHeight}^ -gravity $cropGravity -extent {$fixedWidth}x{$fixedHeight} -strip -quality $quality $outW";
+          } else {
+            // Max. Kantenlänge (ursprünglicher Modus)
+            $isWin = stripos(PHP_OS, 'WIN') === 0;
+            $gt = $isWin ? '^>' : '\>';
+            $cmdW = "$cmd $in -resize {$maxEdge}x{$maxEdge}{$gt} -strip -quality $quality $outW";
+          }
+          
           @exec($cmdW . " 2>&1", $oW, $rcW);
           if ($rcW !== 0) $log[] = "❌ WebP Fehler: $file\n" . implode("\n", $oW);
         }
@@ -180,6 +258,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_FILES['uploads']['name'][0]
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>ImageMagick Mini-UI</title>
+  <script>
+    function toggleResizeMode(mode) {
+      const maxEdgeFields = document.getElementById('maxEdgeFields');
+      const fixedSizeFields = document.getElementById('fixedSizeFields');
+      if (mode === 'maxEdge') {
+        maxEdgeFields.style.display = 'block';
+        fixedSizeFields.style.display = 'none';
+      } else {
+        maxEdgeFields.style.display = 'none';
+        fixedSizeFields.style.display = 'block';
+      }
+    }
+  </script>
   <style>
     body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;max-width:900px;margin:24px auto;padding:0 16px;}
     .card{border:1px solid #ddd;border-radius:12px;padding:16px;box-shadow:0 2px 10px rgba(0,0,0,.04);margin-bottom:16px;}
@@ -193,6 +284,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_FILES['uploads']['name'][0]
     h2{margin-top:0;color:#333}
     ul{list-style:disc;}
     li{margin:4px 0;}
+    hr{margin:20px 0;border:none;border-top:1px solid #ddd;}
+    h3{margin:16px 0 12px;font-size:15px;color:#333;}
   </style>
 </head>
 <body>
@@ -208,7 +301,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_FILES['uploads']['name'][0]
   </div>
 
   <div class="card">
-    <h2>📁 Input-Ordner</h2>
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <h2 style="margin:0;">📁 Input-Ordner</h2>
+      <form method="post" style="margin:0;display:inline;" onsubmit="return confirm('Sind Sie sicher? Der Inhalt wird unwiederbringlich gelöscht!');">
+        <input type="hidden" name="deleteFolder" value="input">
+        <button type="submit" style="margin:0;padding:6px 12px;font-size:12px;background:#dc3545;color:#fff;border:none;border-radius:6px;cursor:pointer;">✕ Löschen</button>
+      </form>
+    </div>
     <div class="file-list">
       <?php
         $inputFiles = listFiles($input);
@@ -227,19 +326,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_FILES['uploads']['name'][0]
   </div>
 
   <div class="card">
-    <h2>📁 Output-Ordner</h2>
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <h2 style="margin:0;">📁 Output-Ordner</h2>
+      <div style="display:flex;gap:8px;">
+        <form method="post" style="margin:0;display:inline;" onsubmit="return confirm('Sind Sie sicher? Der Inhalt wird unwiederbringlich gelöscht!');">
+          <input type="hidden" name="deleteFolder" value="output">
+          <button type="submit" style="margin:0;padding:6px 12px;font-size:12px;background:#dc3545;color:#fff;border:none;border-radius:6px;cursor:pointer;">✕ Löschen</button>
+        </form>
+        <form method="post" style="margin:0;display:inline;">
+          <input type="hidden" name="downloadZip" value="1">
+          <button type="submit" style="margin:0;padding:6px 12px;font-size:12px;background:#28a745;color:#fff;border:none;border-radius:6px;cursor:pointer;">⬇ ZIP</button>
+        </form>
+      </div>
+    </div>
     <div class="file-list">
       <?php
         $outputFiles = listFiles($output);
         if (empty($outputFiles)) {
           echo '<p style="color:#999;">Keine Dateien vorhanden</p>';
         } else {
-          echo '<ul style="margin:0;padding-left:20px;">';
+          echo '<ul style="margin:0;padding-left:20px;list-style:none;">';
           foreach ($outputFiles as $file) {
-            echo '<li>' . h($file) . '</li>';
+            $fileUrl = 'output/' . urlencode($file);
+            echo '<li style="margin:6px 0;"><a href="' . h($fileUrl) . '" download style="color:#0066cc;text-decoration:none;display:inline-flex;align-items:center;gap:6px;"><span>⬇</span><span>' . h($file) . '</span></a></li>';
           }
           echo '</ul>';
-          echo '<p style="color:#666;font-size:12px;">Gesamt: ' . count($outputFiles) . ' Datei(en)</p>';
+          echo '<p style="color:#666;font-size:12px;margin-top:12px;">Gesamt: ' . count($outputFiles) . ' Datei(en)</p>';
         }
       ?>
     </div>
@@ -256,8 +368,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_FILES['uploads']['name'][0]
       <input name="output" value="<?=h($output)?>" placeholder="<?=h($defaultOutput)?>">
       <div class="hint">Standard: <?=h($defaultOutput)?></div>
 
-      <label>Maximale Kantenlänge (px)</label>
-      <input name="maxEdge" type="number" value="<?=h((string)$maxEdge)?>" min="100" max="20000">
+      <hr style="margin:20px 0;border:none;border-top:1px solid #ddd;">
+      <h3 style="margin-top:0;font-size:16px;">Resize-Modus</h3>
+      
+      <label>Resize-Modus auswählen</label>
+      <select name="resizeMode" onchange="toggleResizeMode(this.value)" style="margin-bottom:16px;">
+        <option value="maxEdge" <?=$resizeMode==='maxEdge'?'selected':''?>>Maximale Kantenlänge</option>
+        <option value="fixedSize" <?=$resizeMode==='fixedSize'?'selected':''?>>Feste Größe (mit Cropping)</option>
+      </select>
+
+      <div id="maxEdgeFields" style="display:<?=$resizeMode==='maxEdge'?'block':'none'?>;padding:12px;background:#f5f5f5;border-radius:8px;margin-bottom:16px;">
+        <label>Maximale Kantenlänge (px)</label>
+        <input name="maxEdge" type="number" value="<?=h((string)$maxEdge)?>" min="100" max="20000">
+        <div class="hint">Bild wird auf maximal diese Größe skaliert, ohne Vergrößerung</div>
+      </div>
+
+      <div id="fixedSizeFields" style="display:<?=$resizeMode==='fixedSize'?'block':'none'?>;padding:12px;background:#f5f5f5;border-radius:8px;margin-bottom:16px;">
+        <label>Breite (px)</label>
+        <input name="fixedWidth" type="number" value="<?=h((string)$fixedWidth)?>" min="100" max="20000">
+
+        <label>Höhe (px)</label>
+        <input name="fixedHeight" type="number" value="<?=h((string)$fixedHeight)?>" min="100" max="20000">
+
+        <label>Cropping-Position</label>
+        <select name="cropGravity">
+          <option value="center" <?=$cropGravity==='center'?'selected':''?>>Mitte</option>
+          <option value="north" <?=$cropGravity==='north'?'selected':''?>>Oben</option>
+          <option value="south" <?=$cropGravity==='south'?'selected':''?>>Unten</option>
+          <option value="east" <?=$cropGravity==='east'?'selected':''?>>Rechts</option>
+          <option value="west" <?=$cropGravity==='west'?'selected':''?>>Links</option>
+          <option value="northeast" <?=$cropGravity==='northeast'?'selected':''?>>Oben-Rechts</option>
+          <option value="northwest" <?=$cropGravity==='northwest'?'selected':''?>>Oben-Links</option>
+          <option value="southeast" <?=$cropGravity==='southeast'?'selected':''?>>Unten-Rechts</option>
+          <option value="southwest" <?=$cropGravity==='southwest'?'selected':''?>>Unten-Links</option>
+        </select>
+      </div>
+
+      <hr style="margin:20px 0;border:none;border-top:1px solid #ddd;">
+      <h3 style="margin-top:0;font-size:16px;">Weitere Optionen</h3>
 
       <label>Qualität (1–100)</label>
       <input name="quality" type="number" value="<?=h((string)$quality)?>" min="1" max="100">
